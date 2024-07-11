@@ -1,0 +1,716 @@
+---
+title: "ML project"
+author: "Howard Ding"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r nflfastr}
+library(nflfastR)
+pbp_2023 <- load_pbp(2023)
+pbp_2023_key <- pbp_2023[, c(2, 4, 5, 8, 29, 30, 51, 56, 57, 60, 58)]
+```
+
+
+```{r remove special teams}
+no_special <- subset(pbp_2023, !(special == 1))
+```
+
+
+```{r average epa}
+mean_data <- aggregate(cbind(epa, success, yards_gained) ~ posteam + game_id, 
+                       data = no_special, 
+                       FUN = mean, 
+                       na.rm = TRUE)
+
+plays_data <- aggregate(cbind(plays = epa) ~ posteam + game_id, 
+                        data = no_special, 
+                        FUN = length)
+
+final_data <- merge(mean_data, plays_data, by = c("posteam", "game_id"))
+
+names(final_data)[names(final_data) == "epa"] <- "mean_epa"
+names(final_data)[names(final_data) == "success"] <- "success_rate"
+names(final_data)[names(final_data) == "yards_gained"] <- "ypc"
+```
+
+
+```{r different play type}
+# Creating a helper column for number of plays
+no_special$n_plays <- ave(no_special$game_id,no_special$posteam, no_special$pass, FUN = length)
+
+# Aggregating data
+metrics <- aggregate(cbind(n_pass = pass, n_rush = rush, 
+                           pass_yards = yards_gained * pass, 
+                           rush_yards = yards_gained * rush, 
+                           epa_pass = epa * pass, 
+                           epa_rush = epa * rush,
+                           success_pass = ifelse(epa > 0 & pass == 1, 1, 0),
+                           success_rush = ifelse(epa > 0 & rush == 1, 1, 0),
+                           yds_pass = yards_gained * pass, 
+                           yds_rush = yards_gained * rush, 
+                           sacks = sack, 
+                           interception = interception) ~ posteam + game_id + away_team + home_team + defteam, 
+                         data = no_special, FUN = sum, na.rm = TRUE)
+
+# Calculating per pass and per rush metrics
+metrics$epa_per_pass <- with(metrics, epa_pass / n_pass)
+metrics$epa_per_rush <- with(metrics, epa_rush / n_rush)
+metrics$success_per_pass <- with(metrics, success_pass / n_pass)
+metrics$success_per_rush <- with(metrics, success_rush / n_rush)
+metrics$y_per_pass <- with(metrics, yds_pass / n_pass)
+metrics$y_per_rush <- with(metrics, yds_rush / n_rush)
+
+# Removing intermediate columns
+metrics <- metrics[, !names(metrics) %in% c("epa_pass", "epa_rush", "success_pass", "success_rush", "yds_pass", "yds_rush")]
+
+#Ratio of pass plays to run plays home 
+metrics$n_pass <- as.integer(metrics$n_pass)
+metrics$n_rush <- as.integer(metrics$n_rush)
+metrics$ratio <- with(metrics, n_pass / n_rush)
+
+#Sacks 
+metrics$sack_allowed_per_play <- with(metrics, sacks / (n_rush + n_pass))
+
+#Total Yards
+metrics$total_yards_gained <- with(metrics, (pass_yards + rush_yards))
+
+#Point Diffferential 
+
+
+```
+
+
+```{r}
+points_for_hometeam <- aggregate(total_home_score ~ game_id + home_team + away_team + posteam, data = pbp_2023_key, max, na.rm = TRUE)
+points_for_hometeam <- subset(points_for_hometeam, posteam == home_team)
+colnames(points_for_hometeam)[which(colnames(points_for_hometeam) == "total_home_score")] <- "score"
+
+points_for_awayteam <- aggregate(total_away_score ~ game_id + home_team + away_team + posteam, data = pbp_2023_key, max, na.rm = TRUE)
+points_for_awayteam <- subset(points_for_awayteam, posteam == away_team)
+colnames(points_for_awayteam)[which(colnames(points_for_awayteam) == "total_away_score")] <- "score"
+
+score <- rbind(points_for_awayteam, points_for_hometeam)
+colnames(score)[which(colnames(score) == "score")] <- "points_scored"
+
+points_for_awayteam  <- aggregate(total_away_score ~ game_id + home_team + away_team + posteam, data = pbp_2023_key, max, na.rm = TRUE)
+points_allowed_1 <- subset(points_for_awayteam, posteam == home_team)
+colnames(points_allowed_1)[which(colnames(points_allowed_1) == "total_away_score")] <- "points_allowed"
+
+points_for_hometeam <- aggregate(total_home_score ~ game_id + home_team + away_team + posteam, data = pbp_2023_key, max, na.rm = TRUE)
+points_allowed_2 <- subset(points_for_hometeam, posteam == away_team)
+colnames(points_allowed_2)[which(colnames(points_allowed_2) == "total_home_score")] <- "points_allowed"
+
+points_allowed <- rbind(points_allowed_1, points_allowed_2)
+
+metrics <- merge(metrics, points_allowed, by = c("game_id", "home_team", "away_team", "posteam"))
+metrics <- merge(metrics, score, by = c("game_id", "home_team", "away_team", "posteam"))
+metrics$point_diff <- metrics$points_allowed - metrics$points_scored
+```
+
+
+
+```{r}
+com_data <- merge(final_data, metrics, by = c("posteam", "game_id"))
+```
+
+
+
+```{r}
+com_data$wins <- ifelse(com_data$points_scored > com_data$points_allowed, 
+                           com_data$home_team, 
+                           com_data$away_team)
+```
+
+```{r}
+com_data$results <- ifelse(com_data$wins == com_data$posteam, 'W', 'L')
+ready_data <- com_data
+ready_data_2023 <- ready_data
+```
+
+
+```{r}
+
+temp <- as.data.frame(matrix(NA, nrow = 2, ncol = ncol(ready_data_2023)))
+names(temp) <- names(ready_data_2023)
+
+temp$posteam <- c("LAR", "BAL")
+temp$game_id <- c("xyz","xyz")
+```
+
+```{r}
+ready_data_2023 <- rbind.data.frame(ready_data_2023, temp)
+```
+
+
+
+```{r}
+teams <- unique(ready_data_2023$posteam)
+
+game_number <- rep(NA, nrow(ready_data_2023))
+
+for(i in 1:length(teams)){
+  game_number[which(ready_data_2023$posteam == teams[i])] <- rep(1:sum(ready_data_2023$posteam == teams[i]))
+}
+
+```
+
+
+```{r}
+ready_data_2023$game_number <- game_number
+```
+
+
+
+
+
+```{r}
+game_ids <- unique(ready_data_2023$game_id)
+```
+
+
+```{r}
+past_stats <- as.data.frame(matrix(NA, nrow = nrow(ready_data_2023), ncol = 22))
+
+for(i in 1:nrow(ready_data_2023)){
+  temp <- ready_data_2023[ which(ready_data_2023$posteam == ready_data_2023$posteam[i] &
+                              ready_data_2023$game_number < ready_data_2023$game_number[i]),c(3:6,10:27), ]
+  if(nrow(temp) >0){
+    past_stats[i,] <- colMeans(temp)
+  }
+}
+```
+
+
+
+```{r}
+names(past_stats) <- names(ready_data_2023[c(3:6,10:27)])
+```
+
+```{r}
+team_1 <- team_2 <- rep(NA, length(game_ids))
+
+for(i in 1:length(game_ids)){
+  teams <- ready_data_2023$posteam[which(ready_data_2023$game_id == game_ids[i])]
+  team_1[i] <- teams[1]
+  team_2[i] <- teams[2]
+}
+
+```
+
+```{r}
+game_db <- cbind.data.frame(game_ids, team_1, team_2)
+```
+
+```{r}
+team_1_stats <- team_2_stats <- as.data.frame(matrix(NA, nrow = nrow(game_db), ncol = ncol(past_stats)))
+
+for(i in 1:nrow(game_db)){
+  team_1_stats[i,] <- past_stats[which(ready_data_2023$game_id == game_db$game_ids[i] &
+                                         ready_data_2023$posteam == game_db$team_1[i]),]
+    team_2_stats[i,] <- past_stats[which(ready_data_2023$game_id == game_db$game_ids[i] &
+                                         ready_data_2023$posteam == game_db$team_2[i]),]
+  
+}
+```
+
+```{r}
+names(team_1_stats) <- paste(names(past_stats), "_1", sep ="")
+names(team_2_stats) <- paste(names(past_stats), "_2", sep ="")
+```
+
+
+
+
+```{r}
+res_db <- cbind.data.frame(game_db, team_1_stats, team_2_stats)
+```
+
+
+```{r}
+result_game <- rep(NA, nrow(res_db))
+
+for(i in 1:nrow(res_db)){
+  result_game[i] <- ready_data_2023$results[which(ready_data_2023$game_id == res_db$game_ids[i] &
+                                            ready_data_2023$posteam == res_db$team_1[i])]
+}
+
+```
+
+```{r}
+res_db$win <- result_game
+res_db_2023 <- res_db
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+2022 data 
+
+```{r nflfastr}
+library(nflfastR)
+pbp_2022 <- load_pbp(2003:2022)
+pbp_2022_key <- pbp_2022[, c(2, 4, 5, 8, 29, 30, 51, 56, 57, 60, 58)]
+```
+
+
+```{r remove special teams}
+no_special <- subset(pbp_2022, !(special == 1))
+```
+
+
+```{r average epa}
+mean_data <- aggregate(cbind(epa, success, yards_gained) ~ posteam + game_id, 
+                       data = no_special, 
+                       FUN = mean, 
+                       na.rm = TRUE)
+
+plays_data <- aggregate(cbind(plays = epa) ~ posteam + game_id, 
+                        data = no_special, 
+                        FUN = length)
+
+final_data <- merge(mean_data, plays_data, by = c("posteam", "game_id"))
+
+names(final_data)[names(final_data) == "epa"] <- "mean_epa"
+names(final_data)[names(final_data) == "success"] <- "success_rate"
+names(final_data)[names(final_data) == "yards_gained"] <- "ypc"
+```
+
+
+```{r different play type}
+# Creating a helper column for number of plays
+no_special$n_plays <- ave(no_special$game_id,no_special$posteam, no_special$pass, FUN = length)
+
+# Aggregating data
+metrics <- aggregate(cbind(n_pass = pass, n_rush = rush, 
+                           pass_yards = yards_gained * pass, 
+                           rush_yards = yards_gained * rush, 
+                           epa_pass = epa * pass, 
+                           epa_rush = epa * rush,
+                           success_pass = ifelse(epa > 0 & pass == 1, 1, 0),
+                           success_rush = ifelse(epa > 0 & rush == 1, 1, 0),
+                           yds_pass = yards_gained * pass, 
+                           yds_rush = yards_gained * rush, 
+                           sacks = sack, 
+                           interception = interception) ~ posteam + game_id + away_team + home_team + defteam, 
+                         data = no_special, FUN = sum, na.rm = TRUE)
+
+# Calculating per pass and per rush metrics
+metrics$epa_per_pass <- with(metrics, epa_pass / n_pass)
+metrics$epa_per_rush <- with(metrics, epa_rush / n_rush)
+metrics$success_per_pass <- with(metrics, success_pass / n_pass)
+metrics$success_per_rush <- with(metrics, success_rush / n_rush)
+metrics$y_per_pass <- with(metrics, yds_pass / n_pass)
+metrics$y_per_rush <- with(metrics, yds_rush / n_rush)
+
+# Removing intermediate columns
+metrics <- metrics[, !names(metrics) %in% c("epa_pass", "epa_rush", "success_pass", "success_rush", "yds_pass", "yds_rush")]
+
+#Ratio of pass plays to run plays home 
+metrics$n_pass <- as.integer(metrics$n_pass)
+metrics$n_rush <- as.integer(metrics$n_rush)
+metrics$ratio <- with(metrics, n_pass / n_rush)
+
+#Sacks 
+metrics$sack_allowed_per_play <- with(metrics, sacks / (n_rush + n_pass))
+
+#Total Yards
+metrics$total_yards_gained <- with(metrics, (pass_yards + rush_yards))
+
+```
+
+
+```{r}
+points_for_hometeam <- aggregate(total_home_score ~ game_id + home_team + away_team + posteam, data = pbp_2022_key, max, na.rm = TRUE)
+points_for_hometeam <- subset(points_for_hometeam, posteam == home_team)
+colnames(points_for_hometeam)[which(colnames(points_for_hometeam) == "total_home_score")] <- "score"
+
+points_for_awayteam <- aggregate(total_away_score ~ game_id + home_team + away_team + posteam, data = pbp_2022_key, max, na.rm = TRUE)
+points_for_awayteam <- subset(points_for_awayteam, posteam == away_team)
+colnames(points_for_awayteam)[which(colnames(points_for_awayteam) == "total_away_score")] <- "score"
+
+score <- rbind(points_for_awayteam, points_for_hometeam)
+colnames(score)[which(colnames(score) == "score")] <- "points_scored"
+
+points_for_awayteam  <- aggregate(total_away_score ~ game_id + home_team + away_team + posteam, data = pbp_2022_key, max, na.rm = TRUE)
+points_allowed_1 <- subset(points_for_awayteam, posteam == home_team)
+colnames(points_allowed_1)[which(colnames(points_allowed_1) == "total_away_score")] <- "points_allowed"
+
+points_for_hometeam <- aggregate(total_home_score ~ game_id + home_team + away_team + posteam, data = pbp_2022_key, max, na.rm = TRUE)
+points_allowed_2 <- subset(points_for_hometeam, posteam == away_team)
+colnames(points_allowed_2)[which(colnames(points_allowed_2) == "total_home_score")] <- "points_allowed"
+
+points_allowed <- rbind(points_allowed_1, points_allowed_2)
+
+metrics <- merge(metrics, points_allowed, by = c("game_id", "home_team", "away_team", "posteam"))
+metrics <- merge(metrics, score, by = c("game_id", "home_team", "away_team", "posteam"))
+metrics$point_diff <- metrics$points_allowed - metrics$points_scored
+```
+
+
+
+```{r}
+com_data <- merge(final_data, metrics, by = c("posteam", "game_id"))
+```
+
+
+
+```{r}
+com_data$wins <- ifelse(com_data$points_scored > com_data$points_allowed, 
+                           com_data$home_team, 
+                           com_data$away_team)
+```
+
+
+```{r}
+com_data$results <- ifelse(com_data$wins == com_data$posteam, 'W', 'L')
+ready_data <- com_data
+ready_data_2022 <- ready_data[, -c(1,2,7,8,9,28)]
+```
+
+
+```{r}
+teams <- unique(ready_data$posteam)
+
+game_number <- rep(NA, nrow(ready_data))
+
+for(i in 1:length(teams)){
+  game_number[which(ready_data$posteam == teams[i])] <- rep(1:sum(ready_data$posteam == teams[i]))
+}
+
+```
+
+
+```{r}
+ready_data$game_number <- game_number
+```
+
+
+
+
+
+```{r}
+game_ids <- unique(ready_data$game_id)
+```
+
+
+```{r}
+past_stats <- as.data.frame(matrix(NA, nrow = nrow(ready_data), ncol = 22))
+
+for(i in 1:nrow(ready_data)){
+  temp <- ready_data[ which(ready_data$posteam == ready_data$posteam[i] &
+                              ready_data$game_number < ready_data$game_number[i]),c(3:6,10:27), ]
+  if(nrow(temp) >0){
+    past_stats[i,] <- colMeans(temp)
+  }
+}
+```
+
+
+
+```{r}
+names(past_stats) <- names(ready_data[c(3:6,10:27)])
+```
+
+```{r}
+team_1 <- team_2 <- rep(NA, length(game_ids))
+
+for(i in 1:length(game_ids)){
+  teams <- ready_data$posteam[which(ready_data$game_id == game_ids[i])]
+  team_1[i] <- teams[1]
+  team_2[i] <- teams[2]
+}
+
+```
+
+```{r}
+game_db <- cbind.data.frame(game_ids, team_1, team_2)
+```
+
+```{r}
+team_1_stats <- team_2_stats <- as.data.frame(matrix(NA, nrow = nrow(game_db), ncol = ncol(past_stats)))
+
+for(i in 1:nrow(game_db)){
+  team_1_stats[i,] <- past_stats[which(ready_data$game_id == game_db$game_ids[i] &
+                                         ready_data$posteam == game_db$team_1[i]),]
+    team_2_stats[i,] <- past_stats[which(ready_data$game_id == game_db$game_ids[i] &
+                                         ready_data$posteam == game_db$team_2[i]),]
+  
+}
+```
+
+```{r}
+names(team_1_stats) <- paste(names(past_stats), "_1", sep ="")
+names(team_2_stats) <- paste(names(past_stats), "_2", sep ="")
+```
+
+
+
+
+```{r}
+res_db <- cbind.data.frame(game_db, team_1_stats, team_2_stats)
+```
+
+
+```{r}
+result_game <- rep(NA, nrow(res_db))
+
+for(i in 1:nrow(res_db)){
+  result_game[i] <- ready_data$results[which(ready_data$game_id == res_db$game_ids[i] &
+                                            ready_data$posteam == res_db$team_1[i])]
+}
+
+```
+
+```{r}
+res_db$win <- result_game
+res_db_2022 <- res_db
+```
+
+models
+
+
+```{r}
+set.seed(7)
+
+#total_obs <- dim(res_db_2022)[1]
+#train_data_indices <- sample(1:total_obs, 0.8*total_obs)
+#train_data <- res_db_2022[train_data_indices,]
+#test_data <- res_db_2022[-train_data_indices,]
+
+train_data <- res_db_2022
+test_data <- res_db_2023[-nrow(res_db_2023), ]
+```
+
+
+```{r}
+train_data$win
+test_data$win
+```
+
+```{r}
+cl_train <- na.omit(train_data[, c(4:24, 48)])
+cl_test <- na.omit(test_data[, c(4:24, 48)])
+```
+
+
+```{r}
+library(randomForest)
+rf_mod <- randomForest(factor(win) ~., # Set tree formula
+                         data = cl_train, # Set dataset
+                         ntree = 200,
+                         nodesize = 1,
+                         mtry = 12) # Set number of trees to use
+rf_preds <- predict(rf_mod, cl_test, type = "prob") # Create predictions for random forest model
+
+# Convert predictions to classes, using 0.5
+rf_pred_class <- rep("L", nrow(rf_preds))
+rf_pred_class[rf_preds[,2] >= 0.5] <- "W"
+
+t <- table(rf_pred_class, cl_test$win) # Create table
+confusionMatrix(t, positive = "W")
+```
+
+
+
+```{r}
+library(xgboost)
+dtrain <- xgb.DMatrix(data = as.matrix(train_data[, 4:24]), label = as.numeric(as.factor(train_data$win)) - 1)
+dtest <- xgb.DMatrix(data = as.matrix(test_data[, 4:24]), label = as.numeric(as.factor(test_data$win)) - 1)
+
+
+set.seed(111111)
+
+bst_1 <- xgboost(data = dtrain, # Set training data
+
+               eta = 0.01,
+
+               nrounds = 2000, # Set number of rounds
+
+               
+
+               verbose = 1, # 1 - Prints out fit
+
+                print_every_n = 500# Prints out result every 500th iteration
+
+ )
+```
+
+```{r}
+# Assuming you have the caret package installed
+library(caret)
+
+boost_preds <- predict(bst_1, dtest)
+
+pred_dat <- cbind.data.frame(boost_preds, test_data$win)
+
+boost_pred_label <- ifelse(boost_preds >= 0.5,"W", "L")
+
+# Create a confusion matrix
+confusionMatrix(as.factor(boost_pred_label), as.factor(test_data$win), positive = "W")
+
+```
+
+
+```{r}
+set.seed(111111)
+bst_mod_1 <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.3, # Set learning rate
+              
+               nrounds = 100, # Set number of rounds
+               early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "rmse") # Set evaluation metric to use
+
+set.seed(111111)
+bst_mod_2 <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.1, # Set learning rate
+              
+               nrounds = 100, # Set number of rounds
+               early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "rmse") # Set evaluation metric to use
+
+set.seed(111111)
+bst_mod_3 <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.05, # Set learning rate
+              
+               nrounds = 100, # Set number of rounds
+               early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "rmse") # Set evaluation metric to use
+
+set.seed(111111)
+bst_mod_4 <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.01, # Set learning rate
+              
+               nrounds = 100, # Set number of rounds
+               early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "rmse") # Set evaluation metric to use
+
+set.seed(111111)
+bst_mod_5 <- xgb.cv(data = dtrain, # Set training data
+              
+              nfold = 5, # Use 5 fold cross-validation
+               
+               eta = 0.005, # Set learning rate
+              
+               nrounds = 100, # Set number of rounds
+               early_stopping_rounds = 50, # Set number of rounds to stop at if there is no improvement
+               
+               verbose = 1, # 1 - Prints out fit
+               nthread = 1, # Set number of parallel threads
+               print_every_n = 20, # Prints out result every 20th iteration
+              
+               objective = "binary:logistic", # Set objective
+               eval_metric = "auc",
+               eval_metric = "rmse") # Set evaluation metric to use
+```
+```{r}
+pd1 <- cbind.data.frame(bst_mod_1$evaluation_log[,c("iter", "test_rmse_mean")], rep(0.3, nrow(bst_mod_1$evaluation_log)))
+names(pd1)[3] <- "eta"
+# Extract results for model with eta = 0.1
+pd2 <- cbind.data.frame(bst_mod_2$evaluation_log[,c("iter", "test_rmse_mean")], rep(0.1, nrow(bst_mod_2$evaluation_log)))
+names(pd2)[3] <- "eta"
+# Extract results for model with eta = 0.05
+pd3 <- cbind.data.frame(bst_mod_3$evaluation_log[,c("iter", "test_rmse_mean")], rep(0.05, nrow(bst_mod_3$evaluation_log)))
+names(pd3)[3] <- "eta"
+# Extract results for model with eta = 0.01
+pd4 <- cbind.data.frame(bst_mod_4$evaluation_log[,c("iter", "test_rmse_mean")], rep(0.01, nrow(bst_mod_4$evaluation_log)))
+names(pd4)[3] <- "eta"
+# Extract results for model with eta = 0.005
+pd5 <- cbind.data.frame(bst_mod_5$evaluation_log[,c("iter", "test_rmse_mean")], rep(0.005, nrow(bst_mod_5$evaluation_log)))
+names(pd5)[3] <- "eta"
+# Join datasets
+plot_data <- rbind.data.frame(pd1, pd2, pd3, pd4, pd5)
+# Converty ETA to factor
+plot_data$eta <- as.factor(plot_data$eta)
+# Plot points
+g_6 <- ggplot(plot_data, aes(x = iter, y = test_rmse_mean, color = eta))+
+  geom_point(alpha = 0.5) +
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "rmse Rate v Number of Trees",
+       y = "rmse Rate", color = "Learning \n Rate")  # Set labels
+g_6
+```
+```{r}
+imp_mat <- xgb.importance(model = bst_1)
+# Plot importance (top 10 variables)
+xgb.plot.importance(imp_mat, top_n = 10)
+```
+
+```{r}
+thursday <- res_db_2023[nrow(res_db_2023), ]
+th_pred <- xgb.DMatrix(data = as.matrix(thursday[, 4:24]))
+thursday_preds <- predict(bst_1, th_pred)
+th_dat <- cbind.data.frame(thursday_preds, thursday$win)
+
+th_pred_label <- ifelse(thursday_preds >= 0.5,"W", "L")
+```
+
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
