@@ -558,7 +558,6 @@ bst_1 <- xgboost(data = dtrain, # Set training data
 ```
 
 ```{r}
-# Assuming you have the caret package installed
 library(caret)
 
 boost_preds <- predict(bst_1, dtest)
